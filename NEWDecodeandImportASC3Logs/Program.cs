@@ -16,6 +16,7 @@ using System.ComponentModel;
 using System.Dynamic;
 using System.Timers;
 using MOE.Common;
+using System.Collections;
 
 namespace NEWDecodeandImportASC3Logs
 {
@@ -23,44 +24,91 @@ namespace NEWDecodeandImportASC3Logs
     {
         static void Main(string[] args)
         {
-            var appSettings = ConfigurationManager.AppSettings;
-            List<string> dirList = new List<string>();
-            string cwd = appSettings["ASC3LogsPath"];
-            foreach (string s in Directory.GetDirectories(cwd))
+            while (true)
             {
-                dirList.Add(s);
+
+                var appSettings = ConfigurationManager.AppSettings;
+                List<string> dirList = new List<string>();
+                string cwd = appSettings["ASC3LogsPath"];
+                int minutesToWait = Convert.ToInt32(ConfigurationManager.AppSettings["MinutesToWait"]);
+                foreach (string s in Directory.GetDirectories(cwd))
+                {
+                    dirList.Add(s);
+                }
+
+
+                // Added by Andre to put command Line Args to this program.
+
+                dirList.Sort();
+                var firstFolder = cwd + " ";
+                var lastFolder = cwd + "zzzzzzzzz";
+                if (args.Length == 0)
+                {
+                    Console.WriteLine("There are no args.  Do the entire list of folders");
+                }
+                else if (args.Length == 1)
+                {
+                    Console.WriteLine(" Only have one arg {0}.  Skip unitl this is the sub-directory", args[0]);
+                    firstFolder = cwd + args[0];
+                    Console.WriteLine("This is the first folder {0}", firstFolder);
+                }
+                else
+                {
+                    Console.WriteLine("There are two or more args : First folder is {0}, last folder is {1} ", args[0], args[1]);
+                    firstFolder = cwd + args[0];
+                    lastFolder = cwd + args[1];
+                }
+
+                foreach (var dir in dirList)
+
+                {
+                    if (String.Compare(dir.Trim(), firstFolder.Trim()) >= 0
+                        && String.Compare(dir.Trim(), lastFolder.Trim()) < 0)
+                    {
+                        Console.WriteLine(dir);
+                    }
+                }
+
+                SimplePartitioner<string> sp = new SimplePartitioner<string>(dirList);
+                ParallelOptions optionsMain = new ParallelOptions { MaxDegreeOfParallelism = Convert.ToInt32(appSettings["MaxThreadsMain"]) };
+                Parallel.ForEach(sp, optionsMain, dir =>
+                {
+                    if (String.Compare(dir.Trim(), firstFolder.Trim()) >= 0
+                        && String.Compare(dir.Trim(), lastFolder.Trim()) < 0)
+                    {
+                        var toDelete = new ConcurrentBag<string>();
+                        var mergedEventsTable = new BlockingCollection<MOE.Common.Data.MOE.Controller_Event_LogRow>();
+                        if (Convert.ToBoolean(appSettings["WriteToConsole"]))
+                        {
+                            Console.WriteLine("-----------------------------Starting Signal " + dir);
+                        }
+                        string signalId;
+                        string[] fileNames;
+                        GetFileNamesAndSignalId(dir, out signalId, out fileNames);
+                        foreach (var fileName in fileNames)
+                        {
+                            try
+                            {
+                                MOE.Common.Business.LogDecoder.Asc3Decoder.DecodeAsc3File(fileName, signalId,
+                                    mergedEventsTable, Convert.ToDateTime(appSettings["EarliestAcceptableDate"]));
+                                toDelete.Add(fileName);
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine(ex.Message);
+                            }
+                        }
+                        MOE.Common.Data.MOE.Controller_Event_LogDataTable elTable = CreateDataTableForImport();
+                        AddEventsToImportTable(mergedEventsTable, elTable);
+                        mergedEventsTable.Dispose();
+                        BulkImportRecordsAndDeleteFiles(appSettings, toDelete, elTable);
+                    }
+                });
+
+                Console.WriteLine(DateTime.Now.ToString("t")  +
+                    " is time to take a nap, and then Start again.  Program will Wait {0} minutes. ", minutesToWait);
+                System.Threading.Thread.Sleep(minutesToWait * 60 * 1000);
             }
-            SimplePartitioner<string> sp = new SimplePartitioner<string>(dirList);
-            ParallelOptions optionsMain = new ParallelOptions { MaxDegreeOfParallelism = Convert.ToInt32(appSettings["MaxThreadsMain"]) };
-            Parallel.ForEach(sp, optionsMain, dir =>
-            {
-                var toDelete = new ConcurrentBag<string>();
-                var mergedEventsTable = new BlockingCollection<MOE.Common.Data.MOE.Controller_Event_LogRow>();
-                if (Convert.ToBoolean(appSettings["WriteToConsole"]))
-                {
-                    Console.WriteLine("-----------------------------Starting Signal " + dir);
-                }
-                string signalId;
-                string[] fileNames;
-                GetFileNamesAndSignalId(dir, out signalId, out fileNames);
-                foreach (var fileName in fileNames)
-                {
-                    try
-                    {
-                        MOE.Common.Business.LogDecoder.Asc3Decoder.DecodeAsc3File(fileName, signalId,
-                            mergedEventsTable, Convert.ToDateTime(appSettings["EarliestAcceptableDate"]));
-                        toDelete.Add(fileName);
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine(ex.Message);
-                    }
-                }
-                MOE.Common.Data.MOE.Controller_Event_LogDataTable elTable = CreateDataTableForImport();
-                AddEventsToImportTable(mergedEventsTable, elTable);
-                mergedEventsTable.Dispose();
-                BulkImportRecordsAndDeleteFiles(appSettings, toDelete, elTable);
-            });
         }
 
         private static void GetFileNamesAndSignalId(string dir, out string signalId, out string[] fileNames)

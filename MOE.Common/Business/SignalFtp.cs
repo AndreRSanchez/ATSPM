@@ -9,6 +9,7 @@ using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -27,6 +28,8 @@ namespace MOE.Common.Business
         private Models.Signal Signal { get; set; }
         private SignalFtpOptions SignalFtpOptions { get; set; }
         private string FileToBeDeleted { get; set; }
+        public static FtpSslValidation OnValidateCertificate { get; private set; }
+
         public override bool Equals(object obj)
         {
             if (obj == null || GetType() != obj.GetType()) return false;
@@ -64,7 +67,7 @@ namespace MOE.Common.Business
             try
             {
                 string localFileName = ftpListItem.Name; 
-                Console.WriteLine(@"Transfering " + ftpListItem.Name + @" from " + Signal.ControllerType.FTPDirectory + @" on " + Signal.IPAddress  + @" to " + SignalFtpOptions.LocalDirectory + Signal.SignalID);
+                //Console.WriteLine(@"Transfering " + ftpListItem.Name + @" from " + Signal.ControllerType.FTPDirectory + @" on " + Signal.IPAddress  + @" to " + SignalFtpOptions.LocalDirectory + Signal.SignalID);
                 //chek to see if the local dir exists.
                 //if not, make it.
                 if (!Directory.Exists(SignalFtpOptions.LocalDirectory))
@@ -100,18 +103,120 @@ namespace MOE.Common.Business
         }
 
 
+        public static void Delete1EosFiles()
+        {
+            List<string> hostList = new List<string>
+            {
+                "10.235.15.143",
+                "10.235.6.27",
+                "10.235.11.27",
+                "10.235.9.239",
+                "10.235.11.15",
+                "10.167.6.39",
+                "10.167.5.203",
+                "10.162.10.143",
+                "10.167.6.155",
+                "10.210.233.15",
+                "10.210.232.143",
+                "10.163.6.15",
+                "10.163.6.15",
+                "10.164.5.167",
+                "10.164.6.217",
+                "10.164.6.203",
+                "10.164.6.191",
+                "10.164.6.169",
+                "10.204.12.27",
+                "10.210.197.15",
+                "10.168.6.203",
+                "10.212.12.179",
+                "10.212.19.39",
+                "10.138.205.15",
+                "10.138.204.143",
+                "10.138.203.15",
+                "10.138.205.143",
+                "10.138.202.15",
+                "10.138.203.143",
+                "10.209.2.102"
+            };
+
+
+
+
+            foreach (var host in hostList)
+            {
+                FtpClient sftpTest = new FtpClient
+                {
+                    Credentials = new NetworkCredential("econolite", "ecpi2ecpi"),
+                    DataConnectionType = FtpDataConnectionType.PASV,
+                    DataConnectionEncryption = true,
+                    SslProtocols = System.Security.Authentication.SslProtocols.Tls12,
+                    EnableThreadSafeDataConnections = true,
+                    EncryptionMode = FtpEncryptionMode.None
+                };
+                //X509Certificate2 cert = new X509Certificate2(@"C:\Temp\MakeCert\certificate.crt");
+                //sftpTest.ClientCertificates.Add(cert);
+
+                sftpTest.Host = host;
+                Console.WriteLine(" Before Connection, host is {0}", host);
+                sftpTest.Connect();
+                Console.WriteLine("After Connection for {0}", host);
+                var filePattern = ".datZ";
+                int counter = 0;
+                sftpTest.SetWorkingDirectory("set1");
+
+                using (sftpTest)
+                {
+                    FtpListItem[] remoteFiles = sftpTest.GetListing();
+                    Console.WriteLine("    There are {0} files.", remoteFiles.Length);
+                    foreach (var getFtpFile in remoteFiles)
+                    {
+                        if (getFtpFile.Type == FtpFileSystemObjectType.File && getFtpFile.Name.EndsWith(filePattern))
+                        {
+                            string fileName = getFtpFile.Name;
+                            sftpTest.DeleteFile(fileName);
+                            Console.Write(" {0}.  This file is deleted -> {1}\r", counter, fileName);
+                            counter++;
+                        }
+                        if (counter > 20) break;
+                    }
+                }
+                sftpTest.Disconnect();
+                Console.WriteLine();
+                Console.WriteLine("Finished for Host {0} ", host);
+            }
+            System.Environment.Exit(1);
+            Console.WriteLine("Need to Stop now");
+        }
+
+
+        private static bool OnValidadateCertiticate()
+        {
+            return true;
+        }
+
         public void GetCurrentRecords()
         {
+
             var errorRepository = ApplicationEventRepositoryFactory.Create();
             FtpClient ftpClient = new FtpClient(Signal.IPAddress);
             ftpClient.Credentials = new NetworkCredential(Signal.ControllerType.UserName, Signal.ControllerType.Password);
             ftpClient.ConnectTimeout = SignalFtpOptions.FtpConectionTimeoutInSeconds * 1000;
             ftpClient.ReadTimeout = SignalFtpOptions.FtpReadTimeoutInSeconds * 1000;
             if (Signal.ControllerType.ActiveFTP)
+            {
+            //    ftpClient.DataConnectionType = FtpDataConnectionType.AutoActive;
                 ftpClient.DataConnectionType = FtpDataConnectionType.AutoActive;
+            }
+
             var filePattern = ".dat";
-            using(ftpClient)
-            { 
+            var maximumFilesToTransfer = SignalFtpOptions.MaximumNumberOfFilesTransferAtOneTime;
+            if (Signal.ControllerTypeID == 9)
+            {
+                filePattern = ".datZ";
+                maximumFilesToTransfer  *= 12;
+            }
+            using (ftpClient)
+            {
                 try
                 {
                     ftpClient.Connect();
@@ -140,7 +245,7 @@ namespace MOE.Common.Business
                     Console.WriteLine(Signal.SignalID + " @ " + Signal.IPAddress + " - " + ex.Message);
                     return;
                 }
-
+                
                 if (ftpClient.IsConnected && ftpClient.DirectoryExists(".." + Signal.ControllerType.FTPDirectory))
                 {
                     try
@@ -158,8 +263,10 @@ namespace MOE.Common.Business
                             {
                                 localDate = localDate.AddMinutes(120);
                             }
+                            var  fileTransferedCounter = 1;
                             foreach (var ftpFile in remoteFiles)
                             {
+                                if(fileTransferedCounter > maximumFilesToTransfer) { break; }
                                 if(ftpFile.Type == FtpFileSystemObjectType.File && ftpFile.Name.Contains(filePattern) && ftpFile.Created < localDate)
                                 {
                                     try
@@ -167,6 +274,7 @@ namespace MOE.Common.Business
                                         if (TransferFile(ftpClient, ftpFile))
                                         {
                                             retrievedFiles.Add(ftpFile.Name);
+                                            fileTransferedCounter++;
                                         }
                                     }
                                     //If there is an error, Print the error and try the file again.
@@ -195,13 +303,21 @@ namespace MOE.Common.Business
                                         Thread.Sleep(SignalFtpOptions.WaitBetweenFileDownloadInMilliseconds);
                                 }
                             }
-
-                            //Delete the files we downloaded.  We don't want ot have to deal with the file more than once.  If we delete the file form the controller once we capture it, it will reduce redundancy.
+                            //Delete the files we downloaded.  We don't want to have to deal with the file more than once.  If we delete the file form the controller once we capture it, it will reduce redundancy.
                             if (SignalFtpOptions.DeleteAfterFtp)
                             {
-                                DeleteFilesFromFtpServer(ftpClient, retrievedFiles); //, Token);
-                            }
+                                if (Signal.ControllerTypeID == 9)
 
+                                {
+                                    ftpClient.Disconnect();
+                                    DeleteAllEosFiles(Signal, retrievedFiles);
+                                }
+                                else
+                                {
+                                    DeleteFilesFromFtpServer(ftpClient, retrievedFiles); //, Token);
+                                }
+                            }
+                            
                         }
                     }
                     catch (Exception ex)
@@ -249,6 +365,69 @@ namespace MOE.Common.Business
             }
         }
 
+        private void DeleteAllEosFiles(Signal signal, List<string> retrievedFiles)
+        {
+            //Console.WriteLine();
+            //Console.WriteLine();
+            //Console.WriteLine();
+            //Console.WriteLine("Start of DeleteAllEosFIles");
+            //Console.WriteLine("The Host is {0}", signal.IPAddress.ToString());
+            FtpClient sftpEos = new FtpClient
+            {
+            Credentials = new NetworkCredential(signal.ControllerType.UserName, signal.ControllerType.Password),
+                DataConnectionType = FtpDataConnectionType.PASV,
+                DataConnectionEncryption = true,
+                SslProtocols = System.Security.Authentication.SslProtocols.Tls12,
+                EnableThreadSafeDataConnections = true,
+                EncryptionMode = FtpEncryptionMode.None
+            };
+            sftpEos.Host = signal.IPAddress.ToString();
+            sftpEos.Connect();
+            Console.WriteLine("After Connection for {0} signalId {1} is connected ",
+                signal.IPAddress.ToString(), signal.SignalID, sftpEos.IsConnected.ToString());
+            var errorRepository = ApplicationEventRepositoryFactory.Create();
+            var filePattern = ".datZ";
+            var remotePWD = sftpEos.GetWorkingDirectory();
+            using (sftpEos)
+            {
+                //Console.WriteLine(" In the retrieved files, there are {0} files.  PWD is {1}", retrievedFiles.Count(), remotePWD);
+                foreach (var ftpFileName in retrievedFiles)
+                {
+                   if (ftpFileName.EndsWith(filePattern))
+                   {
+                        try
+                        {
+                            sftpEos.DeleteFile("../" + Signal.ControllerType.FTPDirectory + "/" + ftpFileName);
+                           // Console.Write(" This file is deleted -> ..{0}/{1}\r", Signal.ControllerType.FTPDirectory, ftpFileName);
+                        }
+                        catch (AggregateException)
+                        {
+                            errorRepository.QuickAdd("FTPFromAllcontrollers", "Signal", "DeleteFilesFromFTPServer", Models.ApplicationEvent.SeverityLevels.Medium, Signal.SignalID + " @ " + Signal.IPAddress + " - " + "Connection Failure one or more errors occured deleting the file via FTP");
+                            Console.WriteLine(Signal.SignalID + " @ " + Signal.IPAddress + " - " + "Connection Failure one or more errors occured deleting the file via FTP");
+                        }
+                        catch (SocketException ex)
+                        {
+                            errorRepository.QuickAdd("FTPFromAllcontrollers", "Signal", "DeleteFilesFromFTPServer", Models.ApplicationEvent.SeverityLevels.Medium, Signal.SignalID + " @ " + Signal.IPAddress + " - " + ex.Message);
+                            Console.WriteLine(ex.Message);
+                        }
+                        catch (IOException ex)
+                        {
+                            errorRepository.QuickAdd("FTPFromAllcontrollers", "Signal", "DeleteFilesFromFTPServer", Models.ApplicationEvent.SeverityLevels.Medium, Signal.SignalID + " @ " + Signal.IPAddress + " - " + ex.Message);
+                            Console.WriteLine(ex.Message);
+                        }
+                        catch (Exception ex)
+                        {
+                            errorRepository.QuickAdd("FTPFromAllcontrollers", "Signal", "DeleteFilesFromFTPServer", Models.ApplicationEvent.SeverityLevels.Medium, Signal.SignalID + " @ " + Signal.IPAddress + " - " + ex.Message);
+                            Console.WriteLine("Exception:" + ex.Message + " While Deleting file: " + ftpFileName + " from " + Signal.ControllerType.FTPDirectory + " on " + Signal.IPAddress);
+                        }
+                        if (SignalFtpOptions.WaitBetweenFileDownloadInMilliseconds > 0)
+                            Thread.Sleep(SignalFtpOptions.WaitBetweenFileDownloadInMilliseconds);
+                   }
+                }
+            }
+            sftpEos.Disconnect();
+        }
+
         private void DeleteFilesFromFtpServer(FtpClient ftpClient, List<String> filesToDelete)
         {
             var errorRepository = ApplicationEventRepositoryFactory.Create();
@@ -257,7 +436,8 @@ namespace MOE.Common.Business
             {
                 try
                 {
-                    ftpClient.DeleteFile(Signal.ControllerType.FTPDirectory +"/" + ftpFile);
+                    ftpClient.DeleteFile(Signal.ControllerType.FTPDirectory + "/" + ftpFile);
+                    //Console.Write("For Signal {0], this file is deleted: {1}\r", Signal.SignalID, ftpFile);
                 }
                 catch (AggregateException)
                 {
@@ -615,8 +795,10 @@ namespace MOE.Common.Business
 
                         if (Settings.Default.WriteToConsole)
                         {
+                            Console.WriteLine(" For Signal {0} There are rows {1}", sigId, elTable.Rows.Count);
                             bulkCopy.SqlRowsCopied +=
                                 OnSqlRowsCopied;
+                            //Console.WriteLine( " For Signal {0}", sigId);
                             bulkCopy.NotifyAfter = Settings.Default.BulkCopyBatchSize;
                         }
                         bulkCopy.DestinationTableName = tableName;
@@ -683,10 +865,12 @@ namespace MOE.Common.Business
             }
         }
 
+
         private static void OnSqlRowsCopied(
             object sender, SqlRowsCopiedEventArgs e)
+
         {
-            Console.WriteLine("Copied {0} so far...", e.RowsCopied);
+            Console.WriteLine(" {0} thousand rows copied, so far...", e.RowsCopied/1000);
         }
 
         public static bool SplitBulkToDb(DataTable elTable, BulkCopyOptions options, string tableName)
@@ -945,7 +1129,18 @@ namespace MOE.Common.Business
 
     public class SignalFtpOptions
     {
-        public SignalFtpOptions(int snmpTimeout, int snmpRetry, int snmpPort, bool deleteAfterFtp, string localDirectory, int ftpConectionTimeoutInSeconds, int ftpReadTimeoutInSeconds, bool skipCurrentLog, bool renameDuplicateFiles, int waitBetweenFileDownloadInMilliseconds)
+        public SignalFtpOptions(
+            int snmpTimeout, 
+            int snmpRetry,
+            int snmpPort, 
+            bool deleteAfterFtp, 
+            string localDirectory, 
+            int ftpConectionTimeoutInSeconds, 
+            int ftpReadTimeoutInSeconds, 
+            bool skipCurrentLog, 
+            bool renameDuplicateFiles, 
+            int waitBetweenFileDownloadInMilliseconds, 
+            int maximumNumberOfFilesTransferAtOneTime)
         {
             SnmpTimeout = snmpTimeout;
             SnmpRetry = snmpRetry;
@@ -957,6 +1152,7 @@ namespace MOE.Common.Business
             SkipCurrentLog = skipCurrentLog;
             RenameDuplicateFiles = renameDuplicateFiles;
             WaitBetweenFileDownloadInMilliseconds = waitBetweenFileDownloadInMilliseconds;
+            MaximumNumberOfFilesTransferAtOneTime = maximumNumberOfFilesTransferAtOneTime;
         }
 
         public int SnmpTimeout { get; set; }
@@ -969,5 +1165,8 @@ namespace MOE.Common.Business
         public bool RenameDuplicateFiles { get; set; }
         public int WaitBetweenFileDownloadInMilliseconds { get; set; }
         public string LocalDirectory { get; set; }
+        public int MaximumNumberOfFilesTransferAtOneTime { get; set; }
+        
     }
+    
 }
